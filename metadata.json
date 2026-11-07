@@ -1,0 +1,6 @@
+{
+  "name": "Pétrus Ký Science Quest - The Final Code",
+  "description": "Một hành trình – Bốn mật mã – Một nhà vô địch. Nền tảng game giải mật thư khoa học đỉnh cao dành cho học sinh THPT của Tổ Khoa học Tự nhiên Trường Pétrus Ký.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

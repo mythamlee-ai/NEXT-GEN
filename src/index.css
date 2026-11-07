@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-heading: 'Outfit', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: #f8fafc;
+    color: #0f172a;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+    letter-spacing: -0.02em;
+  }
+
+  code, pre, .font-code {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* 3D Perspective & Transform Utilities */
+.perspective-800 {
+  perspective: 800px;
+}
+.perspective-1000 {
+  perspective: 1000px;
+}
+.perspective-1500 {
+  perspective: 1500px;
+}
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+.backface-hidden {
+  backface-visibility: hidden;
+}
+
+/* Futuristic Sci-Fi 3D Perspective Ground Grid - Bright Edition */
+.bg-space-grid {
+  background-size: 40px 40px;
+  background-image: 
+    linear-gradient(to right, rgba(14, 165, 233, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(14, 165, 233, 0.1) 1px, transparent 1px);
+}
+
+.perspective-grid {
+  background-size: 60px 60px;
+  background-image:
+    linear-gradient(to right, rgba(14, 165, 233, 0.18) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(168, 85, 247, 0.15) 1px, transparent 1px);
+  transform: rotateX(65deg) scale(2);
+  transform-origin: 50% 100%;
+}
+
+/* Hologram Glassmorphism & Glow Tokens - Bright Edition */
+.holo-panel {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid rgba(14, 165, 233, 0.35);
+  box-shadow: 
+    0 10px 30px -5px rgba(14, 165, 233, 0.16),
+    0 4px 6px -2px rgba(0, 0, 0, 0.05),
+    inset 0 0 20px 0 rgba(14, 165, 233, 0.06);
+}
+
+.holo-panel-purple {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid rgba(168, 85, 247, 0.35);
+  box-shadow: 
+    0 10px 30px -5px rgba(168, 85, 247, 0.16),
+    0 4px 6px -2px rgba(0, 0, 0, 0.05),
+    inset 0 0 20px 0 rgba(168, 85, 247, 0.06);
+}
+
+.holo-panel-amber {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid rgba(245, 158, 11, 0.35);
+  box-shadow: 
+    0 10px 30px -5px rgba(245, 158, 11, 0.16),
+    0 4px 6px -2px rgba(0, 0, 0, 0.05),
+    inset 0 0 20px 0 rgba(245, 158, 11, 0.06);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 25px -2px rgba(14, 165, 233, 0.4);
+}
+
+.glow-purple {
+  box-shadow: 0 0 25px -2px rgba(168, 85, 247, 0.4);
+}
+
+.glow-amber {
+  box-shadow: 0 0 25px -2px rgba(245, 158, 11, 0.4);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 25px -2px rgba(16, 185, 129, 0.4);
+}
+
+/* 3D Sci-Fi Interactive Button */
+.btn-3d-sci-fi {
+  position: relative;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateZ(0);
+}
+.btn-3d-sci-fi:hover {
+  transform: translateY(-2px) translateZ(10px);
+}
+.btn-3d-sci-fi:active {
+  transform: translateY(1px) translateZ(0);
+}
+
+/* Custom scrollbars for bright theme */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(241, 245, 249, 0.9);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(14, 165, 233, 0.5);
+  border-radius: 9999px;
+  border: 1px solid rgba(14, 165, 233, 0.2);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(14, 165, 233, 0.8);
+}
+
+/* Orbital Rings & Hologram Keyframes */
+@keyframes orbit-cw {
+  0% { transform: rotate3d(1, 1, 0, 0deg); }
+  100% { transform: rotate3d(1, 1, 0, 360deg); }
+}
+
+@keyframes orbit-ccw {
+  0% { transform: rotate3d(1, -1, 1, 0deg); }
+  100% { transform: rotate3d(1, -1, 1, -360deg); }
+}
+
+@keyframes float-core {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-10px) scale(1.03); }
+}
+
+@keyframes scanline-radar {
+  0% { transform: translateY(-100%); opacity: 0.8; }
+  100% { transform: translateY(1000%); opacity: 0.1; }
+}
+
+@keyframes pulse-energy {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.08); filter: drop-shadow(0 0 15px rgba(6, 182, 212, 0.8)); }
+}
+
+.animate-orbit-cw {
+  animation: orbit-cw 12s linear infinite;
+}
+
+.animate-orbit-ccw {
+  animation: orbit-ccw 16s linear infinite;
+}
+
+.animate-float-core {
+  animation: float-core 4s ease-in-out infinite;
+}
+
+.animate-scanline-radar {
+  animation: scanline-radar 3.5s linear infinite;
+}
+
+.animate-pulse-energy {
+  animation: pulse-energy 2.5s ease-in-out infinite;
+}
