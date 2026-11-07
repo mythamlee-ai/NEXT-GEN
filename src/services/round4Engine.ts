@@ -188,10 +188,36 @@ export class Round4Engine {
   public static getTeamState(teamId: string): Round4TeamState | null {
     if (typeof window === 'undefined') return null;
     try {
+      const team = storageService.getTeamById(teamId);
       const data = localStorage.getItem(`${STORAGE_KEYS.ROUND4_TEAM_STATE_PREFIX}${teamId}`);
-      if (data) {
-        return JSON.parse(data);
+      const localState: Round4TeamState | null = data ? JSON.parse(data) : null;
+
+      if (team && team.round4State) {
+        if (!localState) {
+          this.saveTeamState(team.round4State);
+          return team.round4State;
+        }
+        const remoteAnswersCount = Object.keys(team.round4State.aiDetectiveAnswers || {}).length;
+        const localAnswersCount = Object.keys(localState.aiDetectiveAnswers || {}).length;
+        const remoteAttempts = team.round4State.keywordAttempts || 0;
+        const localAttempts = localState.keywordAttempts || 0;
+        const remoteMatched = team.round4State.backupPairsMatched?.length || 0;
+        const localMatched = localState.backupPairsMatched?.length || 0;
+
+        if (
+          remoteAnswersCount > localAnswersCount ||
+          remoteAttempts > localAttempts ||
+          remoteMatched > localMatched ||
+          team.round4State.keywordSolved ||
+          team.round4State.backupCompleted ||
+          (team.updatedAt || 0) > (localState.lastActiveTime || 0)
+        ) {
+          this.saveTeamState(team.round4State);
+          return team.round4State;
+        }
       }
+
+      return localState;
     } catch {
       // Fallback
     }
@@ -990,6 +1016,30 @@ export class Round4Engine {
 
     this.saveTeamState(state);
 
+    const updatedTeam: Team = {
+      ...team,
+      round4State: state,
+      updatedAt: Date.now(),
+    };
+    storageService.saveTeam(updatedTeam);
+
+    this.recordLog({
+      id: `log-${Date.now()}-kw-fail-${currentAttempts}`,
+      timestamp: Date.now(),
+      teamId: team.id,
+      teamName: team.teamName,
+      packageId: state.assignedPackageId,
+      step: 'final_keyword',
+      questionTitle: `Thử Mật Mã TRI ÂN (Lần ${currentAttempts})`,
+      userAnswer: enteredKeyword,
+      isCorrect: false,
+      bonusAwarded: 0,
+      penaltyDeducted: 0,
+      keywordAwarded: undefined,
+      elapsedSeconds,
+      newScore: team.score,
+    });
+
     const message =
       attemptsLeft > 0
         ? `Mật mã chưa chính xác! Bạn còn ${attemptsLeft} lượt thử.`
@@ -1001,7 +1051,7 @@ export class Round4Engine {
       attemptsLeft,
       canSwitchToBackup,
       message,
-      updatedTeam: team,
+      updatedTeam,
       updatedState: state,
     };
   }

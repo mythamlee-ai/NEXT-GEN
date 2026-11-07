@@ -80,6 +80,8 @@ export interface Team {
     manualAdjustment?: number;
     totalScore: number;
   };
+  updatedAt?: number;
+  version?: number;
 }
 
 // Round 4 Mystery Box Luck Modifiers

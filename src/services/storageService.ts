@@ -23,6 +23,7 @@ const KEYS = {
   GAME_CONFIG: 'pek_game_config',
   ADMIN_PASSWORD: 'pek_admin_password',
   ADMIN_AUTH_SESSION: 'pek_admin_auth_session',
+  ADMIN_TOKEN: 'pek_admin_server_token',
   MYSTERY_CODES: 'pek_mystery_codes_db',
   KEYWORDS: 'pek_science_keywords_db',
 };
@@ -33,6 +34,11 @@ class StorageService {
   private listeners: Set<StorageListener> = new Set();
   private channel: BroadcastChannel | null = null;
   private lastSyncTimestamp: number = 0;
+  private eventSource: EventSource | null = null;
+  private isSSEConnected: boolean = false;
+  private fallbackPollingInterval: any = null;
+  private sseReconnectTimeout: any = null;
+  private sseReconnectAttempts: number = 0;
 
   constructor() {
     this.initDefaultsIfEmpty();
@@ -45,45 +51,258 @@ class StorageService {
         }
       };
     }
-    this.startBackgroundSync();
+    this.initSSE();
+    this.startFallbackPolling();
   }
 
-  private startBackgroundSync() {
-    if (typeof window === 'undefined') return;
-    const sync = async () => {
-      try {
-        const res = await fetch(`/api/sync?since=${this.lastSyncTimestamp}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.teams)) {
-            this.mergeRemoteTeams(data.teams);
-            if (data.config) {
-              const localCfg = localStorage.getItem(KEYS.GAME_CONFIG);
-              if (localCfg !== JSON.stringify(data.config)) {
-                localStorage.setItem(KEYS.GAME_CONFIG, JSON.stringify(data.config));
-                this.notifyLocalListeners({ type: 'CONFIG_UPDATED', payload: data.config });
-              }
-            }
-            this.lastSyncTimestamp = data.timestamp || Date.now();
-          }
+  // -------------------------------------------------------------
+  // SSE REAL-TIME CONNECTION (GET /api/events)
+  // -------------------------------------------------------------
+  public initSSE() {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+      return;
+    }
+
+    // Singleton check: avoid creating duplicate EventSource instances
+    if (this.eventSource && this.eventSource.readyState !== EventSource.CLOSED) {
+      return;
+    }
+
+    try {
+      this.eventSource = new EventSource('/api/events');
+
+      this.eventSource.onopen = () => {
+        this.isSSEConnected = true;
+        this.sseReconnectAttempts = 0;
+        if (this.sseReconnectTimeout) {
+          clearTimeout(this.sseReconnectTimeout);
+          this.sseReconnectTimeout = null;
         }
-      } catch {
-        // Fallback silently if server offline or standalone preview
-      }
-    };
+        // Immediately fetch snapshot upon connect/reconnect to catch up on any missed updates
+        this.syncWithServer();
+      };
 
-    // Run first sync immediately after 300ms
-    setTimeout(sync, 300);
-    // Recurring poll every 2.5s for real-time multi-device tournament play
-    setInterval(sync, 2500);
+      // Handle custom events pushed by server.ts
+      this.eventSource.addEventListener('connected', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          this.lastSyncTimestamp = data.timestamp || Date.now();
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('TEAM_UPDATED', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.payload) {
+            this.mergeRemoteTeam(data.payload);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('TEAMS_UPDATED', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && Array.isArray(data.payload)) {
+            this.mergeRemoteTeams(data.payload);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('TEAM_SCORE_ADJUSTED', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.payload && data.payload.team) {
+            this.mergeRemoteTeam(data.payload.team);
+            this.notifyLocalListeners({ type: 'TEAM_SCORE_ADJUSTED', payload: data.payload });
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('CONFIG_UPDATED', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.payload) {
+            localStorage.setItem(KEYS.GAME_CONFIG, JSON.stringify(data.payload));
+            this.notifyLocalListeners({ type: 'CONFIG_UPDATED', payload: data.payload });
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('MYSTERY_CLAIMED', (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          this.notifyLocalListeners({ type: 'MYSTERY_CLAIMED', payload: data?.payload });
+        } catch {
+          // ignore
+        }
+      });
+
+      this.eventSource.addEventListener('FACTORY_RESET', () => {
+        localStorage.setItem(KEYS.TEAMS, JSON.stringify(defaultInitialTeams));
+        this.setCurrentTeamId(null);
+        this.broadcast('FACTORY_RESET', { timestamp: Date.now() });
+        this.broadcast('TEAMS_UPDATED', defaultInitialTeams);
+      });
+
+      this.eventSource.onerror = () => {
+        this.isSSEConnected = false;
+        if (this.eventSource) {
+          this.eventSource.close();
+          this.eventSource = null;
+        }
+
+        // Schedule reconnect with exponential backoff (min 2.5s, max 15s)
+        this.sseReconnectAttempts++;
+        const delay = Math.min(15000, 2500 * Math.pow(1.5, Math.min(this.sseReconnectAttempts, 4)));
+        if (!this.sseReconnectTimeout) {
+          this.sseReconnectTimeout = setTimeout(() => {
+            this.sseReconnectTimeout = null;
+            this.initSSE();
+          }, delay);
+        }
+      };
+    } catch (err) {
+      this.isSSEConnected = false;
+    }
   }
 
-  private mergeRemoteTeams(remoteTeams: Team[]) {
+  public closeSSE() {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+      this.isSSEConnected = false;
+    }
+    if (this.sseReconnectTimeout) {
+      clearTimeout(this.sseReconnectTimeout);
+      this.sseReconnectTimeout = null;
+    }
+  }
+
+  // -------------------------------------------------------------
+  // FALLBACK POLLING (RUNS WHEN SSE IS DISCONNECTED / INACTIVE)
+  // -------------------------------------------------------------
+  private startFallbackPolling() {
+    if (typeof window === 'undefined') return;
+    if (this.fallbackPollingInterval) return;
+
+    // Fast initial sync after 250ms
+    setTimeout(() => this.syncWithServer(), 250);
+
+    // Fallback polling interval: every 3s
+    this.fallbackPollingInterval = setInterval(() => {
+      // If SSE is connected and healthy, skip aggressive polling to save network bandwidth!
+      if (this.isSSEConnected) {
+        return;
+      }
+      this.syncWithServer();
+    }, 3000);
+  }
+
+  public async syncWithServer(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      const res = await fetch(`/api/sync?since=${this.lastSyncTimestamp}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.teams)) {
+          this.mergeRemoteTeams(data.teams);
+          if (data.config) {
+            const localCfg = localStorage.getItem(KEYS.GAME_CONFIG);
+            if (localCfg !== JSON.stringify(data.config)) {
+              localStorage.setItem(KEYS.GAME_CONFIG, JSON.stringify(data.config));
+              this.notifyLocalListeners({ type: 'CONFIG_UPDATED', payload: data.config });
+            }
+          }
+          this.lastSyncTimestamp = data.timestamp || Date.now();
+        }
+      }
+    } catch {
+      // Fallback silently if server offline or standalone preview
+    }
+  }
+
+  // -------------------------------------------------------------
+  // SMART MERGING LOGIC (VERSION & TIMESTAMP BASED)
+  // -------------------------------------------------------------
+  private isRemoteTeamNewer(local: Team, remote: Team): boolean {
+    // 1. If remote has a higher version, remote is authoritatively newer
+    if ((remote.version || 0) > (local.version || 0)) return true;
+    if ((local.version || 0) > (remote.version || 0)) return false;
+
+    // 2. If versions are equal, compare updatedAt timestamps
+    if ((remote.updatedAt || 0) > (local.updatedAt || 0)) return true;
+    if ((local.updatedAt || 0) > (remote.updatedAt || 0)) return false;
+
+    // 3. Structural checks (Score differences, answer count, status, round)
+    // Accept ANY score change from remote (both increases AND teacher point deductions!)
+    if (remote.score !== local.score) return true;
+
+    const remoteAns = remote.answersHistory ? remote.answersHistory.length : 0;
+    const localAns = local.answersHistory ? local.answersHistory.length : 0;
+    if (remoteAns !== localAns) return remoteAns > localAns;
+
+    if ((remote.currentRound || 1) !== (local.currentRound || 1)) {
+      return (remote.currentRound || 1) > (local.currentRound || 1);
+    }
+
+    // 4. Compare Round 4 state deeply (AI Detective answers count, keyword attempts, backup)
+    if (remote.round4State && !local.round4State) return true;
+    if (remote.round4State && local.round4State) {
+      const remoteAttempts = remote.round4State.keywordAttempts || 0;
+      const localAttempts = local.round4State.keywordAttempts || 0;
+      if (remoteAttempts !== localAttempts) return remoteAttempts > localAttempts;
+
+      const remoteAiAnsCount = Object.keys(remote.round4State.aiDetectiveAnswers || {}).length;
+      const localAiAnsCount = Object.keys(local.round4State.aiDetectiveAnswers || {}).length;
+      if (remoteAiAnsCount !== localAiAnsCount) return remoteAiAnsCount > localAiAnsCount;
+
+      const remoteMatched = remote.round4State.backupPairsMatched?.length || 0;
+      const localMatched = local.round4State.backupPairsMatched?.length || 0;
+      if (remoteMatched !== localMatched) return remoteMatched > localMatched;
+
+      if (remote.round4State.keywordSolved && !local.round4State.keywordSolved) return true;
+      if (remote.round4State.backupCompleted && !local.round4State.backupCompleted) return true;
+    }
+
+    return false;
+  }
+
+  public mergeRemoteTeam(remote: Team) {
+    if (!remote || !remote.id) return;
+    const localTeams = this.getTeams();
+    const idx = localTeams.findIndex((t) => t.id === remote.id);
+
+    if (idx === -1) {
+      const updated = [...localTeams, remote];
+      localStorage.setItem(KEYS.TEAMS, JSON.stringify(updated));
+      this.notifyLocalListeners({ type: 'TEAMS_UPDATED', payload: updated });
+      return;
+    }
+
+    const local = localTeams[idx];
+    if (this.isRemoteTeamNewer(local, remote)) {
+      const updated = [...localTeams];
+      updated[idx] = { ...local, ...remote };
+      localStorage.setItem(KEYS.TEAMS, JSON.stringify(updated));
+      this.notifyLocalListeners({ type: 'TEAMS_UPDATED', payload: updated });
+    }
+  }
+
+  public mergeRemoteTeams(remoteTeams: Team[]) {
     if (typeof window === 'undefined' || !Array.isArray(remoteTeams)) return;
     const localTeams = this.getTeams();
     let changed = false;
 
-    // Map by id
     const teamMap = new Map<string, Team>();
     localTeams.forEach((t) => teamMap.set(t.id, t));
 
@@ -93,15 +312,7 @@ class StorageService {
         teamMap.set(remote.id, remote);
         changed = true;
       } else {
-        // Update if remote has more answers, higher score, or advanced round
-        const remoteAnswersCount = remote.answersHistory ? remote.answersHistory.length : 0;
-        const localAnswersCount = local.answersHistory ? local.answersHistory.length : 0;
-        if (
-          remoteAnswersCount > localAnswersCount ||
-          remote.score > local.score ||
-          (remote.currentRound || 1) > (local.currentRound || 1) ||
-          (remote.roundScores && (remote.roundScores[4] || 0) !== (local.roundScores[4] || 0))
-        ) {
+        if (this.isRemoteTeamNewer(local, remote)) {
           teamMap.set(remote.id, { ...local, ...remote });
           changed = true;
         }
@@ -280,12 +491,18 @@ class StorageService {
   public saveTeam(team: Team) {
     const teams = this.getTeams();
     const idx = teams.findIndex((t) => t.id === team.id);
+    const now = Date.now();
+    const teamToSave: Team = {
+      ...team,
+      updatedAt: team.updatedAt || now,
+    };
+
     let updated: Team[];
     if (idx >= 0) {
       updated = [...teams];
-      updated[idx] = team;
+      updated[idx] = teamToSave;
     } else {
-      updated = [...teams, team];
+      updated = [...teams, teamToSave];
     }
     if (typeof window !== 'undefined') {
       localStorage.setItem(KEYS.TEAMS, JSON.stringify(updated));
@@ -294,13 +511,26 @@ class StorageService {
 
     // Sync to backend server asynchronously for multi-device visibility
     if (typeof window !== 'undefined') {
+      const transactionId = `tx_${team.id}_${now}_${Math.random().toString(36).slice(2, 7)}`;
       fetch('/api/teams', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(team),
-      }).catch(() => {
-        // Silently catch network errors
-      });
+        headers: {
+          'Content-Type': 'application/json',
+          'x-transaction-id': transactionId,
+        },
+        body: JSON.stringify(teamToSave),
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.team) {
+              this.mergeRemoteTeam(data.team);
+            }
+          }
+        })
+        .catch(() => {
+          // Silently catch network errors
+        });
     }
   }
 
@@ -315,9 +545,12 @@ class StorageService {
     this.clearTeamQuestionHistory(teamId);
     this.broadcast('TEAMS_UPDATED', updated);
 
-    // Sync deletion to server
+    // Sync deletion to server with admin authorization
     if (typeof window !== 'undefined') {
-      fetch(`/api/teams/${teamId}`, { method: 'DELETE' }).catch(() => {});
+      fetch(`/api/teams/${teamId}`, {
+        method: 'DELETE',
+        headers: this.getAdminHeaders(),
+      }).catch(() => {});
     }
   }
 
@@ -343,12 +576,17 @@ class StorageService {
       round4MysteryCode: undefined,
       round4MysteryEffect: undefined,
       round4BaseScore: undefined,
+      round4State: undefined,
+      updatedAt: Date.now(),
     };
 
     this.saveTeam(resetTeam);
 
     if (typeof window !== 'undefined') {
-      fetch(`/api/teams/${teamId}/reset`, { method: 'POST' }).catch(() => {});
+      fetch(`/api/teams/${teamId}/reset`, {
+        method: 'POST',
+        headers: this.getAdminHeaders(),
+      }).catch(() => {});
     }
 
     return resetTeam;
