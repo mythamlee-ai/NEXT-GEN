@@ -3,6 +3,11 @@ import { RoundNumber } from './index';
 export type ScienceCoreType = 'physics' | 'chemistry' | 'biology' | 'ai_tech';
 
 export type Round4MissionStep =
+  | 'ai_detective'       // Nhiệm vụ 1: AI Detective - Phát hiện và sửa lỗi AI
+  | 'final_keyword'      // Nhiệm vụ 2: Final Keyword - Giải mã từ khóa tối mật TRI ÂN
+  | 'backup_matching'    // Nhiệm vụ 3: Backup Mission - Ghép nối Tri Ân (nếu không giải được từ khóa)
+  | 'treasure_ceremony'  // Màn hình kết thúc: Kho báu giải mã & Tri ân Ngày Nhà giáo Việt Nam 20/11
+  // Legacy steps for full compatibility:
   | 'ai_scan'
   | 'ai_error_detector'
   | 'science_crossover'
@@ -11,6 +16,37 @@ export type Round4MissionStep =
   | 'keyword_decrypt'
   | 'final_code'
   | 'system_restored';
+
+export interface AIDetectiveQuestion {
+  id: string;
+  title: string;
+  field: 'Vật Lí' | 'Hóa Học' | 'Sinh Học' | 'Khoa Học & Đời Sống' | 'AI & Công Nghệ';
+  aiClaim: string; // Nhận định của AI (có chứa lỗi sai khoa học)
+  questionText: string;
+  options: {
+    id: string;
+    text: string;
+    isCorrect: boolean;
+  }[];
+  correctOptionId: string;
+  correctAnswerText: string; // Nội dung đáp án đúng
+  aiFlawExplanation: string; // AI sai ở đâu? (Chỉ ra lỗi cụ thể)
+  scientificTruth: string; // Kiến thức chính xác (Giải thích khoa học ngắn gọn, dễ hiểu)
+  points: number; // Mặc định 25 - 30 điểm
+  timeLimitSeconds?: number;
+}
+
+export interface BackupMatchingPair {
+  id: string;
+  leftId: string;
+  leftTitle: string;
+  leftIcon: string;
+  leftDescription: string;
+  rightId: string;
+  rightTitle: string;
+  rightDescription: string;
+  meaning: string;
+}
 
 export type DecryptMiniGameType =
   | 'sort'
@@ -163,6 +199,29 @@ export interface Round4TeamState {
   keywordScore: number;
   speedBonus: number;
   finalBonus: number;
+  // --- AI DETECTIVE & TRI ÂN THEME (ROUND 4) ---
+  aiDetectiveScore?: number;
+  aiDetectiveAnswers?: Record<
+    string,
+    {
+      questionId: string;
+      selectedOptionId: string;
+      isCorrect: boolean;
+      pointsAwarded: number;
+      answeredAt: number;
+    }
+  >;
+  aiDetectiveCompleted?: boolean;
+  currentQuestionIndex?: number;
+  // Mission 2: Final Keyword (TRI ÂN)
+  keywordAttempts?: number;
+  maxKeywordAttempts?: number;
+  keywordSolved?: boolean;
+  // Mission 3: Backup Mission
+  backupCompleted?: boolean;
+  backupPairsMatched?: string[];
+  backupScore?: number;
+  // Manual adjustments
   manualAdjustment?: number;
   round4Total: number;
   startTime: number;
@@ -192,6 +251,8 @@ export interface Round4Log {
 export interface Round4Config {
   baseTimeLimitSeconds: number; // default 300 (5 minutes), range 180 - 420
   difficulty: Round4Difficulty;
+  maxKeywordAttempts: number; // default 3
+  aiDetectivePointsPerQuestion: number; // default 30
   bonusValues: number[]; // [10, 20, 30, 50]
   penaltyValues: number[]; // [5, 10, 15, 20]
   speedBonusTable: {

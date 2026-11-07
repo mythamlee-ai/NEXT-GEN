@@ -454,15 +454,15 @@ export const DEFAULT_SCIENCE_KEYWORDS: ScienceKeyword[] = [
   },
   {
     id: 'kw-sec-04',
-    name: 'NEXT GEN',
+    name: 'TRI ÂN',
     round: 'secret',
     category: 'special',
     categoryLabel: 'Chúa Tể',
     points: 100,
     difficulty: 5,
     isSecret: true,
-    description: 'Thế hệ tương lai làm chủ khoa học kỹ thuật và kiến tạo thế giới ngày mai!',
-    hint: 'Mật mã huyền thoại của rương báu Pétrus Ký khi quét mã QR Vòng 4.',
+    description: 'Lòng biết ơn sâu sắc dành cho những người thầy, người cô đã dẫn đường và truyền cảm hứng trên hành trình tri thức.',
+    hint: 'Mật mã tối mật Vòng 4 – Món quà tri ân Ngày Nhà giáo Việt Nam 20/11!',
     active: true,
   },
 ];
@@ -477,6 +477,14 @@ class KeywordService {
       if (data) {
         const parsed = JSON.parse(data);
         if (Array.isArray(parsed) && parsed.length > 0) {
+          // Self-heal/migrate kw-sec-04 to TRI ÂN if it had an old name
+          const sec04 = parsed.find((k: ScienceKeyword) => k.id === 'kw-sec-04');
+          if (sec04 && sec04.name !== 'TRI ÂN') {
+            sec04.name = 'TRI ÂN';
+            sec04.description = 'Lòng biết ơn sâu sắc dành cho những người thầy, người cô đã dẫn đường và truyền cảm hứng trên hành trình tri thức.';
+            sec04.hint = 'Mật mã tối mật Vòng 4 – Món quà tri ân Ngày Nhà giáo Việt Nam 20/11!';
+            this.saveKeywords(parsed);
+          }
           return parsed;
         }
       }

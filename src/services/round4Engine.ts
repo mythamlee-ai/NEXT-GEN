@@ -6,8 +6,14 @@ import {
   Round4Config,
   Round4MissionStep,
   ScanTarget,
+  AIDetectiveQuestion,
+  BackupMatchingPair,
 } from '../types/round4';
 import { defaultRound4Packages } from '../data/round4Packages';
+import {
+  defaultAIDetectiveQuestions,
+  defaultBackupMatchingPairs,
+} from '../data/aiDetectiveQuestions';
 import { storageService } from './storageService';
 import { keywordService } from './keywordService';
 
@@ -16,11 +22,15 @@ const STORAGE_KEYS = {
   ROUND4_CONFIG: 'pek_round4_config_db',
   ROUND4_LOGS: 'pek_round4_logs_db',
   ROUND4_TEAM_STATE_PREFIX: 'pek_round4_state_',
+  AI_DETECTIVE_QUESTIONS: 'pek_ai_detective_questions_db',
+  BACKUP_MATCHING_PAIRS: 'pek_backup_matching_pairs_db',
 };
 
 export const defaultRound4Config: Round4Config = {
   baseTimeLimitSeconds: 300, // 5 minutes
   difficulty: 'STANDARD',
+  maxKeywordAttempts: 3,
+  aiDetectivePointsPerQuestion: 30,
   bonusValues: [10, 20, 30, 50],
   penaltyValues: [5, 10, 15, 20],
   speedBonusTable: {
@@ -129,6 +139,38 @@ export class Round4Engine {
     this.savePackages(defaultRound4Packages);
   }
 
+  // ==================== AI DETECTIVE & BACKUP MISSION ====================
+  public static getAIDetectiveQuestions(): AIDetectiveQuestion[] {
+    if (typeof window === 'undefined') return defaultAIDetectiveQuestions;
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.AI_DETECTIVE_QUESTIONS);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // Fallback
+    }
+    return defaultAIDetectiveQuestions;
+  }
+
+  public static saveAIDetectiveQuestions(questions: AIDetectiveQuestion[]): void {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.AI_DETECTIVE_QUESTIONS, JSON.stringify(questions));
+      window.dispatchEvent(new CustomEvent('PEK_AI_DETECTIVE_QUESTIONS_UPDATED'));
+    }
+  }
+
+  public static resetAIDetectiveQuestions(): void {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(STORAGE_KEYS.AI_DETECTIVE_QUESTIONS);
+    }
+  }
+
+  public static getBackupMatchingPairs(): BackupMatchingPair[] {
+    return defaultBackupMatchingPairs;
+  }
+
   // ==================== RANDOM BONUS & PENALTY ====================
   public static rollBonus(config?: Round4Config): number {
     const cfg = config || this.getConfig();
@@ -176,6 +218,34 @@ export class Round4Engine {
     // 1. Check if team already has a persistent state
     let state = this.getTeamState(team.id) || team.round4State;
     if (state && state.assignedPackageId) {
+      let needsSave = false;
+      if (!state.currentStep || state.currentStep === 'ai_scan') {
+        state.currentStep = 'ai_detective';
+        needsSave = true;
+      }
+      if (state.aiDetectiveScore === undefined) {
+        state.aiDetectiveScore = 0;
+        needsSave = true;
+      }
+      if (!state.aiDetectiveAnswers) {
+        state.aiDetectiveAnswers = {};
+        needsSave = true;
+      }
+      if (state.keywordAttempts === undefined) {
+        state.keywordAttempts = 0;
+        needsSave = true;
+      }
+      if (state.backupPairsMatched === undefined) {
+        state.backupPairsMatched = [];
+        needsSave = true;
+      }
+      if (state.backupScore === undefined) {
+        state.backupScore = 0;
+        needsSave = true;
+      }
+      if (needsSave) {
+        this.saveTeamState(state);
+      }
       const existingPkg = this.getPackageById(state.assignedPackageId);
       if (existingPkg) {
         return { pkg: existingPkg, state };
@@ -217,8 +287,18 @@ export class Round4Engine {
       assignedPackageId: selectedPkg.id,
       uniqueMissionSetId,
       randomSeed,
-      currentStep: 'ai_scan',
-      keywordVaultUnlocked: false,
+      currentStep: 'ai_detective',
+      aiDetectiveScore: 0,
+      aiDetectiveAnswers: {},
+      aiDetectiveCompleted: false,
+      currentQuestionIndex: 0,
+      keywordAttempts: 0,
+      maxKeywordAttempts: 3,
+      keywordSolved: false,
+      backupCompleted: false,
+      backupPairsMatched: [],
+      backupScore: 0,
+      keywordVaultUnlocked: true,
       clueFragments: [],
       aiScanCompleted: false,
       aiErrorCompleted: false,
@@ -229,7 +309,7 @@ export class Round4Engine {
       baseScore,
       randomBonus: 0,
       randomPenalty: 0,
-      keywordScore: team.keywordScore || 0,
+      keywordScore: 0,
       speedBonus: 0,
       finalBonus: 0,
       manualAdjustment: 0,
@@ -672,19 +752,363 @@ export class Round4Engine {
 
   /**
    * Recalculates total score using the strict formula:
-   * TOTAL = V1 + V2 (Cá nhân) + V3 + V4 (Cơ bản + Thưởng - Phạt + Tốc độ + Mã cuối + Điều chỉnh GM)
+   * Recalculates total score using the strict formula:
+   * TOTAL = V1 + V2 (Cá nhân) + V3 + V4
+   * In Round 4:
+   * - AI DETECTIVE: points according to configured questions
+   * - Mission 2 vs Mission 3: TRI ÂN (+100) OR Backup Mission (max 50). Never double awarded!
+   * - GM manual adjustments
    * Note: Round 4 score never drops below 0.
    */
-  public static calculateTotal(state: Round4TeamState): number {
-    const rawR4 =
+  public static calculateRound4Only(state: Round4TeamState): number {
+    const aiDetectivePts = state.aiDetectiveScore || 0;
+    // Strict rule: Either 100 for TRI ÂN or max 50 for Backup Mission
+    const mission2or3Pts = state.keywordSolved
+      ? (state.keywordScore || 100)
+      : (state.backupScore || 0);
+
+    const legacyPts =
       (state.randomBonus || 0) -
       (state.randomPenalty || 0) +
-      (state.keywordScore || 0) +
       (state.speedBonus || 0) +
-      (state.finalBonus || 0) +
-      (state.manualAdjustment || 0);
-    const r4 = Math.max(0, rawR4);
+      (state.finalBonus || 0);
+
+    const manual = state.manualAdjustment || 0;
+    const rawR4 = aiDetectivePts + mission2or3Pts + legacyPts + manual;
+    return Math.max(0, rawR4);
+  }
+
+  public static calculateTotal(state: Round4TeamState): number {
+    const r4 = this.calculateRound4Only(state);
     return (state.baseScore || 0) + r4;
+  }
+
+  /**
+   * ==================== NHIỆM VỤ 1: AI DETECTIVE ====================
+   * Records student's answer to an AI Detective flaw question, applies points,
+   * provides mandatory explanations (both on correct and incorrect).
+   */
+  public static recordAIDetectiveAnswer(
+    team: Team,
+    questionId: string,
+    selectedOptionId: string,
+    elapsedSeconds: number
+  ): {
+    success: boolean;
+    isCorrect: boolean;
+    pointsAwarded: number;
+    question: AIDetectiveQuestion;
+    updatedTeam: Team;
+    updatedState: Round4TeamState;
+    allQuestionsCompleted: boolean;
+  } {
+    const { state } = this.getOrAssignTeamPackage(team);
+    const questions = this.getAIDetectiveQuestions();
+    const qIndex = questions.findIndex((q) => q.id === questionId);
+    const question = questions[qIndex] || questions[0];
+
+    if (!state.aiDetectiveAnswers) state.aiDetectiveAnswers = {};
+
+    const isAlreadyAnswered = !!state.aiDetectiveAnswers[question.id];
+    const isCorrect = selectedOptionId === question.correctOptionId;
+    const pointsAwarded = isAlreadyAnswered ? 0 : isCorrect ? question.points || 30 : 0;
+
+    if (!isAlreadyAnswered) {
+      state.aiDetectiveAnswers[question.id] = {
+        questionId: question.id,
+        selectedOptionId,
+        isCorrect,
+        pointsAwarded,
+        answeredAt: Date.now(),
+      };
+      state.aiDetectiveScore = (state.aiDetectiveScore || 0) + pointsAwarded;
+    }
+
+    const answeredCount = Object.keys(state.aiDetectiveAnswers).length;
+    const allQuestionsCompleted = answeredCount >= questions.length;
+    if (allQuestionsCompleted) {
+      state.aiDetectiveCompleted = true;
+      state.currentStep = 'final_keyword'; // Auto proceed to Mission 2
+    } else {
+      state.currentQuestionIndex = (qIndex + 1) % questions.length;
+    }
+
+    state.elapsedSeconds = elapsedSeconds;
+    state.round4Total = this.calculateRound4Only(state);
+
+    this.saveTeamState(state);
+
+    const totalScore =
+      (team.roundScores[1] || 0) +
+      (team.roundScores[2] || 0) +
+      (team.roundScores[3] || 0) +
+      state.round4Total;
+
+    const updatedTeam: Team = {
+      ...team,
+      score: totalScore,
+      roundScores: {
+        ...team.roundScores,
+        4: state.round4Total,
+      },
+      round4State: state,
+    };
+    storageService.saveTeam(updatedTeam);
+
+    this.recordLog({
+      id: `log-${Date.now()}-ai-det-${question.id}`,
+      timestamp: Date.now(),
+      teamId: team.id,
+      teamName: team.teamName,
+      packageId: state.assignedPackageId,
+      step: 'ai_detective',
+      questionTitle: `AI Detective: ${question.title}`,
+      userAnswer: selectedOptionId,
+      isCorrect,
+      bonusAwarded: pointsAwarded,
+      penaltyDeducted: 0,
+      elapsedSeconds,
+      newScore: totalScore,
+    });
+
+    return {
+      success: true,
+      isCorrect,
+      pointsAwarded,
+      question,
+      updatedTeam,
+      updatedState: state,
+      allQuestionsCompleted,
+    };
+  }
+
+  /**
+   * ==================== NHIỆM VỤ 2: FINAL KEYWORD ====================
+   * Verifies the secret keyword "TRI ÂN" (accepts accented/unaccented, uppercase/lowercase).
+   * If correct: +100 points, opens 3D treasure chest.
+   * If wrong: decrements attempts, allows switching to Backup Mission when exhausted.
+   */
+  public static verifyFinalKeyword(
+    team: Team,
+    enteredKeyword: string,
+    elapsedSeconds: number
+  ): {
+    success: boolean;
+    isCorrect: boolean;
+    attemptsLeft: number;
+    canSwitchToBackup: boolean;
+    message: string;
+    updatedTeam: Team;
+    updatedState: Round4TeamState;
+  } {
+    const { state } = this.getOrAssignTeamPackage(team);
+    const cfg = this.getConfig();
+    const maxAttempts = cfg.maxKeywordAttempts || 3;
+
+    if (state.keywordSolved) {
+      return {
+        success: true,
+        isCorrect: true,
+        attemptsLeft: 0,
+        canSwitchToBackup: false,
+        message: 'Từ khóa TRI ÂN đã được giải mã thành công trước đó!',
+        updatedTeam: team,
+        updatedState: state,
+      };
+    }
+
+    const cleanEntered = this.normalizeAnswer(enteredKeyword);
+    // Target is 'TRI ÂN' (normalized to 'TRIAN')
+    const isCorrect = cleanEntered === 'TRIAN';
+
+    if (isCorrect) {
+      state.keywordSolved = true;
+      state.keywordScore = 100;
+      // Do not allow double points with backup mission
+      state.backupScore = 0;
+      state.currentStep = 'treasure_ceremony';
+      state.completedTime = Date.now();
+      state.elapsedSeconds = elapsedSeconds;
+      state.round4Total = this.calculateRound4Only(state);
+
+      this.saveTeamState(state);
+
+      const totalScore =
+        (team.roundScores[1] || 0) +
+        (team.roundScores[2] || 0) +
+        (team.roundScores[3] || 0) +
+        state.round4Total;
+
+      const updatedTeam: Team = {
+        ...team,
+        score: totalScore,
+        roundScores: {
+          ...team.roundScores,
+          4: state.round4Total,
+        },
+        round4State: state,
+      };
+      storageService.saveTeam(updatedTeam);
+
+      // Unlock secret keyword in keywordService
+      keywordService.unlockKeywordForTeam(team, 'kw-sec-04');
+
+      this.recordLog({
+        id: `log-${Date.now()}-final-keyword-tri-an`,
+        timestamp: Date.now(),
+        teamId: team.id,
+        teamName: team.teamName,
+        packageId: state.assignedPackageId,
+        step: 'final_keyword',
+        questionTitle: 'Giải Mã Từ Khóa Tối Mật: TRI ÂN',
+        userAnswer: enteredKeyword,
+        isCorrect: true,
+        bonusAwarded: 100,
+        penaltyDeducted: 0,
+        keywordAwarded: 'TRI ÂN',
+        elapsedSeconds,
+        newScore: totalScore,
+      });
+
+      return {
+        success: true,
+        isCorrect: true,
+        attemptsLeft: 0,
+        canSwitchToBackup: false,
+        message:
+          'FINAL KEYWORD UNLOCKED! Chúc mừng bạn đã giải mã thành công từ khóa tối mật TRI ÂN (+100 điểm)!',
+        updatedTeam,
+        updatedState: state,
+      };
+    }
+
+    // Incorrect case
+    const currentAttempts = (state.keywordAttempts || 0) + 1;
+    state.keywordAttempts = currentAttempts;
+    const attemptsLeft = Math.max(0, maxAttempts - currentAttempts);
+    const canSwitchToBackup = attemptsLeft === 0;
+
+    this.saveTeamState(state);
+
+    const message =
+      attemptsLeft > 0
+        ? `Mật mã chưa chính xác! Bạn còn ${attemptsLeft} lượt thử.`
+        : 'Bạn đã sử dụng hết lượt thử giải mã. Cổng nhiệm vụ dự phòng (BACKUP MISSION) đã được mở!';
+
+    return {
+      success: true,
+      isCorrect: false,
+      attemptsLeft,
+      canSwitchToBackup,
+      message,
+      updatedTeam: team,
+      updatedState: state,
+    };
+  }
+
+  /**
+   * Switches the team from Final Keyword to Backup Mission
+   */
+  public static switchToBackupMission(teamId: string): boolean {
+    const team = storageService.getTeamById(teamId);
+    if (!team) return false;
+    const { state } = this.getOrAssignTeamPackage(team);
+
+    state.currentStep = 'backup_matching';
+    if (!state.backupPairsMatched) state.backupPairsMatched = [];
+    state.backupScore = 0;
+
+    this.saveTeamState(state);
+    const updatedTeam: Team = {
+      ...team,
+      round4State: state,
+    };
+    storageService.saveTeam(updatedTeam);
+    return true;
+  }
+
+  /**
+   * ==================== NHIỆM VỤ 3: BACKUP MISSION ====================
+   * Records a matched pair about Vietnamese Teachers' Day 20/11.
+   * 10 points per pair, max 50 points (all 5 pairs).
+   */
+  public static recordBackupPairMatch(
+    team: Team,
+    pairId: string,
+    elapsedSeconds: number
+  ): {
+    success: boolean;
+    isComplete: boolean;
+    scoreAwarded: number;
+    currentBackupScore: number;
+    matchedPairsCount: number;
+    updatedTeam: Team;
+    updatedState: Round4TeamState;
+  } {
+    const { state } = this.getOrAssignTeamPackage(team);
+    if (!state.backupPairsMatched) state.backupPairsMatched = [];
+
+    let scoreAwarded = 0;
+    if (!state.backupPairsMatched.includes(pairId)) {
+      state.backupPairsMatched.push(pairId);
+      scoreAwarded = 10;
+      state.backupScore = Math.min(50, state.backupPairsMatched.length * 10);
+    }
+
+    const isComplete = state.backupPairsMatched.length >= 5;
+    if (isComplete) {
+      state.backupCompleted = true;
+      state.currentStep = 'treasure_ceremony';
+      state.completedTime = Date.now();
+    }
+
+    state.elapsedSeconds = elapsedSeconds;
+    state.round4Total = this.calculateRound4Only(state);
+
+    this.saveTeamState(state);
+
+    const totalScore =
+      (team.roundScores[1] || 0) +
+      (team.roundScores[2] || 0) +
+      (team.roundScores[3] || 0) +
+      state.round4Total;
+
+    const updatedTeam: Team = {
+      ...team,
+      score: totalScore,
+      roundScores: {
+        ...team.roundScores,
+        4: state.round4Total,
+      },
+      round4State: state,
+    };
+    storageService.saveTeam(updatedTeam);
+
+    this.recordLog({
+      id: `log-${Date.now()}-backup-pair-${pairId}`,
+      timestamp: Date.now(),
+      teamId: team.id,
+      teamName: team.teamName,
+      packageId: state.assignedPackageId,
+      step: 'backup_matching',
+      questionTitle: `Ghép Nối Tri Ân: Cặp ${pairId}`,
+      userAnswer: pairId,
+      isCorrect: true,
+      bonusAwarded: scoreAwarded,
+      penaltyDeducted: 0,
+      elapsedSeconds,
+      newScore: totalScore,
+    });
+
+    return {
+      success: true,
+      isComplete,
+      scoreAwarded,
+      currentBackupScore: state.backupScore || 0,
+      matchedPairsCount: state.backupPairsMatched.length,
+      updatedTeam,
+      updatedState: state,
+    };
   }
 
   /**
